@@ -10331,14 +10331,26 @@ spv::Id TGlslangToSpvTraverser::getSymbolId(const glslang::TIntermSymbol* symbol
         }
     }
 
-    // Invariance is decided by the stage that PRODUCES a value. Writing 'invariant' on an
-    // input is a legal redeclaration that says nothing the producing stage has not already
-    // said, so it is dropped here instead of being carried into SPIR-V. Two reasons to drop
-    // rather than emit: the decoration has no meaning on an Input variable, and a consumer
-    // that turns this module back into GLSL ES (SPIRV-Cross does, for MobileGL's GLES
-    // backend) would re-emit it as "invariant in ...", which ESSL 3.00+ rejects outright -
-    // so keeping it turns a shader that compiled into one the device driver refuses.
-    if (! symbol->getType().getQualifier().isPipeInput())
+    // 'invariant' constrains how a value is COMPUTED so that two programs computing it agree.
+    // That only means something where the value crosses a boundary the language cares about,
+    // i.e. a shader stage's output feeding a later stage. Two placements are legal to write
+    // and carry no effect at all, and both are dropped here rather than emitted:
+    //
+    //   * an INPUT. Redeclaring an input invariant restates what the producing stage already
+    //     decided; nothing downstream can act on it.
+    //   * a FRAGMENT output. It goes to the framebuffer, not to another stage, so there is no
+    //     second computation for it to agree with.
+    //
+    // Emitting them is not free. A consumer that turns this module back into GLSL ES -
+    // SPIRV-Cross does, for MobileGL's GLES backend - re-emits the decoration as an
+    // `invariant` qualifier, and ESSL rejects it in both positions: 3.00+ forbids it on
+    // inputs outright, and Qualcomm's compiler answers a fragment output with "'invariant' is
+    // only legal type-qualifer for shader outputs and varyings". Either way a shader that
+    // compiled becomes one the device driver refuses, and the draw silently disappears.
+    const bool invariantHasNoConsumer =
+        symbol->getType().getQualifier().isPipeInput() ||
+        (glslangIntermediate->getStage() == EShLangFragment && symbol->getType().getQualifier().isPipeOutput());
+    if (! invariantHasNoConsumer)
         builder.addDecoration(id, TranslateInvariantDecoration(symbol->getType().getQualifier()));
     if (symbol->getQualifier().hasStream() && glslangIntermediate->isMultiStream()) {
         builder.addCapability(spv::Capability::GeometryStreams);
