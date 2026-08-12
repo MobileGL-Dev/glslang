@@ -5684,7 +5684,11 @@ void TGlslangToSpvTraverser::decorateStructType(const glslang::TType& type,
                 addMeshNVDecoration(spvType, member, memberQualifier);
             }
         }
-        builder.addMemberDecoration(spvType, member, TranslateInvariantDecoration(memberQualifier));
+        // Same reasoning as the variable case in TGlslangToSpvTraverser::visitSymbol: an
+        // invariant member of an INPUT block says nothing, and re-emitting it into GLSL ES
+        // would be rejected there.
+        if (type.getQualifier().storage != glslang::EvqVaryingIn)
+            builder.addMemberDecoration(spvType, member, TranslateInvariantDecoration(memberQualifier));
 
         if (type.getBasicType() == glslang::EbtBlock &&
             qualifier.storage == glslang::EvqBuffer) {
@@ -10327,7 +10331,15 @@ spv::Id TGlslangToSpvTraverser::getSymbolId(const glslang::TIntermSymbol* symbol
         }
     }
 
-    builder.addDecoration(id, TranslateInvariantDecoration(symbol->getType().getQualifier()));
+    // Invariance is decided by the stage that PRODUCES a value. Writing 'invariant' on an
+    // input is a legal redeclaration that says nothing the producing stage has not already
+    // said, so it is dropped here instead of being carried into SPIR-V. Two reasons to drop
+    // rather than emit: the decoration has no meaning on an Input variable, and a consumer
+    // that turns this module back into GLSL ES (SPIRV-Cross does, for MobileGL's GLES
+    // backend) would re-emit it as "invariant in ...", which ESSL 3.00+ rejects outright -
+    // so keeping it turns a shader that compiled into one the device driver refuses.
+    if (! symbol->getType().getQualifier().isPipeInput())
+        builder.addDecoration(id, TranslateInvariantDecoration(symbol->getType().getQualifier()));
     if (symbol->getQualifier().hasStream() && glslangIntermediate->isMultiStream()) {
         builder.addCapability(spv::Capability::GeometryStreams);
         builder.addDecoration(id, spv::Decoration::Stream, symbol->getQualifier().layoutStream);
