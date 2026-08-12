@@ -8170,6 +8170,41 @@ void TParseContext::typeParametersCheck(const TSourceLoc& loc, const TPublicType
     }
 }
 
+// Snapshot a folded uniform initializer into the intermediate, in a form a client can apply
+// without knowing anything about glslang's pool-allocated types. Anything that cannot be
+// expressed as plain scalars (a struct, an opaque type) is skipped rather than half-recorded:
+// a partial record would be worse than none, since the client cannot tell it is partial.
+void TParseContext::recordUniformInitializer(const TString& identifier, const TType& type,
+                                             const TConstUnionArray& value)
+{
+    if (value.size() == 0 || type.isStruct() || type.containsOpaque())
+        return;
+
+    TIntermediate::TUniformInitializer record;
+    record.name = identifier.c_str();
+    record.basicType = type.getBasicType();
+    record.vectorSize = type.isMatrix() ? type.getMatrixRows() : type.getVectorSize();
+    record.matrixCols = type.isMatrix() ? type.getMatrixCols() : 0;
+    record.matrixRows = type.isMatrix() ? type.getMatrixRows() : 0;
+    record.arraySize = type.isSizedArray() ? type.getOuterArraySize() : 1;
+
+    for (int i = 0; i < value.size(); ++i) {
+        switch (value[i].getType()) {
+        case EbtInt:    record.intValues.push_back(value[i].getIConst()); break;
+        case EbtUint:   record.intValues.push_back(static_cast<long long>(value[i].getUConst())); break;
+        case EbtInt64:  record.intValues.push_back(value[i].getI64Const()); break;
+        case EbtUint64: record.intValues.push_back(static_cast<long long>(value[i].getU64Const())); break;
+        case EbtBool:   record.intValues.push_back(value[i].getBConst() ? 1 : 0); break;
+        case EbtFloat:
+        case EbtFloat16:
+        case EbtDouble: record.floatValues.push_back(value[i].getDConst()); break;
+        default:
+            return; // an element this snapshot cannot represent; record nothing at all
+        }
+    }
+    intermediate.addUniformInitializer(std::move(record));
+}
+
 bool TParseContext::vkRelaxedRemapUniformVariable(const TSourceLoc& loc, TString& identifier, const TPublicType& publicType,
     TArraySizes*, TIntermTyped* initializer, TType& type)
 {
@@ -8187,7 +8222,21 @@ bool TParseContext::vkRelaxedRemapUniformVariable(const TSourceLoc& loc, TString
     }
 
     if (initializer) {
-        warn(loc, "Ignoring initializer for uniform", identifier.c_str(), "");
+        // Fold the initializer against a throwaway variable of the declared type rather than
+        // dropping it. Two things came out of dropping it, both silent: an implicitly sized
+        // array had nothing left to take its size from ("uniform int a[] = int[](1,2,3);"
+        // became an unsizable array and failed to compile), and the VALUE - which desktop
+        // GLSL says the uniform reads until the application overwrites it - disappeared,
+        // because the remap below turns this uniform into a block member and SPIR-V cannot
+        // carry an initializer there. executeInitializer performs the same constantness
+        // checks and diagnostics it would in the non-relaxed path, and leaves the folded
+        // constant on the variable for recordUniformInitializer to hand to the client.
+        TVariable* folded = new TVariable(&identifier, type);
+        executeInitializer(loc, initializer, folded);
+        const TType& foldedType = folded->getType();
+        if (type.isUnsizedArray() && foldedType.isSizedArray())
+            type.changeOuterArraySize(foldedType.getOuterArraySize());
+        recordUniformInitializer(identifier, foldedType, folded->getConstArray());
         initializer = nullptr;
     }
 
