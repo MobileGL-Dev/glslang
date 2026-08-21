@@ -8265,6 +8265,49 @@ void TParseContext::recordUniformLocation(const TString& identifier, const TType
     intermediate.addUniformLocation(std::move(record));
 }
 
+// The two atomic-counter offset rules that are still checkable at the point where relaxed
+// rules fold the counter into a synthesized buffer block.
+//
+// fixOffset() is what enforces them for an ordinary parse, and it is UNREACHABLE from here:
+// vkRelaxedRemapUniformVariable returns to declareVariable's caller long before the
+// fixOffset() call at the end of that function, which is what the "xxTODO: use logic from
+// fixOffset()" note below refers to. Left unchecked, "layout(offset = 2) uniform atomic_uint
+// c;" - a compile-time error in GL 4.6 core 7.7 - parsed clean and only failed much later, or
+// not at all.
+//
+// The OVERLAP rule fixOffset() also carries is deliberately not here: it needs that
+// function's per-binding offset cursor (atomicUintOffsets / addUsedOffsets), which the
+// relaxed path does not maintain because it never assigns implicit offsets at all.
+void TParseContext::atomicCounterOffsetCheck(const TSourceLoc& loc, const TString& identifier, const TType& type)
+{
+    const TQualifier& qualifier = type.getQualifier();
+    if (!qualifier.hasOffset())
+        return;
+
+    const int offset = qualifier.layoutOffset;
+    if (offset % 4 != 0) {
+        error(loc, "atomic counters offset should align based on 4:", identifier.c_str(), "%d", offset);
+        return;
+    }
+
+    // One 32-bit word per counter, and an array occupies one per element - so what has to fit
+    // is the LAST one. An unsized array has no last element to place, so it gets no verdict
+    // here rather than a guessed one; over-rejecting a declaration is the failure mode the
+    // application cannot work around.
+    long long counters = 1;
+    if (type.isArray()) {
+        if (!type.isSizedArray())
+            return;
+        counters = type.getCumulativeArraySize();
+    }
+
+    const long long lastByte = static_cast<long long>(offset) + counters * 4;
+    if (lastByte > static_cast<long long>(resources.maxAtomicCounterBufferSize)) {
+        error(loc, "atomic counter ends past gl_MaxAtomicCounterBufferSize:", identifier.c_str(), "%d",
+              static_cast<int>(lastByte));
+    }
+}
+
 bool TParseContext::vkRelaxedRemapUniformVariable(const TSourceLoc& loc, TString& identifier, const TPublicType& publicType,
     TArraySizes*, TIntermTyped* initializer, TType& type)
 {
@@ -8321,6 +8364,10 @@ bool TParseContext::vkRelaxedRemapUniformVariable(const TSourceLoc& loc, TString
 
     // Convert atomic_uint into members of a buffer block
     if (type.isAtomic()) {
+        // While it still IS one, and while the offset is still on the qualifier: setBasicType
+        // below makes isAtomic() false and explicitOffset is cleared a few lines after that.
+        atomicCounterOffsetCheck(loc, identifier, type);
+
         type.setBasicType(EbtUint);
         type.getQualifier().storage = EvqBuffer;
 
