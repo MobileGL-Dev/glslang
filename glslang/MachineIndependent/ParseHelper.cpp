@@ -8247,6 +8247,24 @@ void TParseContext::recordUniformInitializer(const TString& identifier, const TT
     intermediate.addUniformInitializer(std::move(record));
 }
 
+// Snapshot a default-block uniform's explicit location into the intermediate, on the way past
+// the point where relaxed rules drop it. The declared array shape travels with it because the
+// client keys these by reflection name and only the declaration still knows that shape.
+void TParseContext::recordUniformLocation(const TString& identifier, const TType& type)
+{
+    TIntermediate::TUniformLocation record;
+    record.name = identifier.c_str();
+    record.location = static_cast<int>(type.getQualifier().layoutLocation);
+
+    if (type.isArray() && type.getArraySizes() != nullptr) {
+        const TArraySizes& arraySizes = *type.getArraySizes();
+        for (int dim = 0; dim < arraySizes.getNumDims(); ++dim)
+            record.arraySizes.push_back(arraySizes.getDimSize(dim));
+    }
+
+    intermediate.addUniformLocation(std::move(record));
+}
+
 bool TParseContext::vkRelaxedRemapUniformVariable(const TSourceLoc& loc, TString& identifier, const TPublicType& publicType,
     TArraySizes*, TIntermTyped* initializer, TType& type)
 {
@@ -8259,6 +8277,10 @@ bool TParseContext::vkRelaxedRemapUniformVariable(const TSourceLoc& loc, TString
     }
 
     if (type.getQualifier().hasLocation()) {
+        // Record before dropping. The qualifier is genuinely meaningless on the block member
+        // this uniform is about to become, but it is still the number the application will
+        // ask glGetUniformLocation for, and this is the last place it exists.
+        recordUniformLocation(identifier, type);
         warn(loc, "ignoring layout qualifier for uniform", identifier.c_str(), "location");
         type.getQualifier().layoutLocation = TQualifier::layoutLocationEnd;
     }
