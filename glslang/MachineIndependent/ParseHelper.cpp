@@ -8361,6 +8361,15 @@ bool TParseContext::vkRelaxedRemapUniformVariable(const TSourceLoc& loc, TString
         return false;
     }
 
+    if (type.getQualifier().hasLocation() && type.isAtomic()) {
+        // Not one of the qualifiers relaxed rules may drop: GLSL 4.60 4.4.3 gives a location to
+        // default-block uniforms only, and an atomic counter is addressed by binding and offset.
+        // The ordinary parse raises this in layoutObjectCheck(); the counter is folded into a
+        // buffer block before that check could see it.
+        error(loc, "cannot specify on atomic counter", "location", "");
+        type.getQualifier().layoutLocation = TQualifier::layoutLocationEnd;
+    }
+
     if (type.getQualifier().hasLocation()) {
         // Record before dropping. The qualifier is genuinely meaningless on the block member
         // this uniform is about to become, but it is still the number the application will
